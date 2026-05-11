@@ -661,29 +661,27 @@ class DeepseekV4CSACompressor(nn.Module):
             compressed = cache_layer.update_compressor_states("compressor", compressed)
         compressed_kv = compressed.unsqueeze(1)
 
-        # Lightning Indexer: gather top-`index_topk` compressed entries per query.
+        # Lightning Indexer: pick top-`index_topk` compressed entries per query.
         # Indexer may return `-1` sentinels for queries with fewer ready blocks than
-        # `index_topk` (early prefill positions): clamp them to a safe gather index
-        # and remember the validity to build a per-query block mask below.
+        # `index_topk` (early prefill positions); we route them to a throwaway
+        # sentinel column when building the per-query mask.
         topk = self.indexer(hidden_states, q_residual, position_ids, past_key_values, layer_idx)  # [B, S, k]
-        k = topk.shape[-1]
-        valid = topk >= 0  # [B, S, k]
-        safe_topk = topk.clamp(min=0)
-        expanded = compressed_kv.unsqueeze(2).expand(-1, -1, seq_len, -1, -1)
-        idx = safe_topk.unsqueeze(1).unsqueeze(-1).expand(-1, 1, -1, -1, self.head_dim)
-        gathered = torch.gather(expanded, 3, idx).reshape(batch, 1, -1, self.head_dim)  # [B, 1, S*k, D]
+        T = compressed_kv.shape[2]
 
-        # Per-query block bias over the flat `S*k` compressed segment: query `t` may
-        # only see slots `[t*k : (t+1)*k]` (its own gathered entries) and only the
-        # ones marked valid by the indexer. Everything else is `-inf`. Without this
-        # the downstream right-pad with 0.0 would let every query attend to entries
-        # selected for other queries, which is not equivalent to per-query CSA.
-        block_bias = gathered.new_full((batch, 1, seq_len, seq_len, k), float("-inf"))
-        allowed = torch.where(valid, gathered.new_zeros(()), gathered.new_full((), float("-inf")))  # [B, S, k]
-        arange_s = torch.arange(seq_len, device=gathered.device)
-        block_bias[:, 0, arange_s, arange_s, :] = allowed  # diagonal: q_idx == block_idx
-        block_bias = block_bias.view(batch, 1, seq_len, seq_len * k)
-        return gathered, block_bias
+        # Per-query scatter bias over the [B, 1, S, T] compressed axis: query `t`
+        # may only attend to its own `k` indexer-picked entries (`0`); every other
+        # slot is `-inf`. This is the bit-exact equivalent of the previous gather-
+        # then-block-bias scheme (which materialised an `[S*k]`-wide KV tensor and
+        # a same-width bias), but compute is `O(S * T)` for Q·K^T downstream
+        # instead of `O(S * S * k)`. For typical CSA shapes (`T = S /
+        # compress_rate`, `k` close to or above `T`), the matmul ratio
+        # `(S * k) / T` reaches the thousands.
+        valid = topk >= 0  # [B, S, k]
+        safe_topk = torch.where(valid, topk, torch.full_like(topk, T))  # invalid -> sentinel col `T`
+        compressed_bias = compressed_kv.new_full((batch, 1, seq_len, T + 1), float("-inf"))
+        compressed_bias.scatter_(-1, safe_topk.unsqueeze(1), 0.0)
+        compressed_bias = compressed_bias[..., :T]  # drop the sentinel column
+        return compressed_kv, compressed_bias
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
