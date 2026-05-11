@@ -117,12 +117,10 @@ def ours_csa_attention(q, compressed_kv, topk, sinks, scaling):
 # Configurations
 # ---------------------------------------------------------------------------
 CONFIGS = {
-    "small":         dict(B=2, S=8,    H=4,  D=16, m=4,  k=4),
-    "V4-Pro-ish":    dict(B=1, S=64,   H=8,  D=64, m=4,  k=32),
-    "long ctx":      dict(B=1, S=256,  H=8,  D=64, m=4,  k=64),
-    "larger":        dict(B=1, S=1024, H=8,  D=64, m=4,  k=64),
-    "very long":     dict(B=1, S=4096, H=8,  D=64, m=4,  k=128),
-    "extra long":    dict(B=1, S=8192, H=8,  D=64, m=4,  k=128),
+    "case1": dict(B=2, S=8,    H=4, D=16, m=4, k=4),    # toy / launch-overhead sanity
+    "case2": dict(B=1, S=256,  H=8, D=64, m=4, k=64),
+    "4K":    dict(B=1, S=4096, H=8, D=64, m=4, k=128),
+    "8K":    dict(B=1, S=8192, H=8, D=64, m=4, k=128),
 }
 
 
