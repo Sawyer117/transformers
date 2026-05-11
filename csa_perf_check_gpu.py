@@ -3,14 +3,14 @@ Compare two CSA per-query sparse-attention expressions on GPU.
 
 Both are mathematically equivalent to MindSpeed-LLM SparseFlashAttentionTriton's
 per-query sparse attention semantics. This script verifies that equivalence
-in fp32 / bf16 / fp16, then benchmarks the two on GPU across configs.
+in fp32 / bf16, then benchmarks the two on GPU across configs.
 
-  Path A — Arthur #45892 (HEAD 8bdbfbb):
+  Path A — #45892 (HEAD 8bdbfbb):
       * gather compressed_kv into [B, 1, S*k, D] via index_select
       * build 5D diagonal block bias [B, 1, S, S, k], view as [B, 1, S, S*k]
       * eager attention is then [B, H, S, S*k]
 
-  Path B — Ours (PR #45879-era follow-up):
+  Path B — Ours:
       * keep compressed_kv as [B, 1, T, D] (no gather)
       * scatter into a [B, 1, S, T+1] -inf mask (last column is invalid-topk
         sentinel), drop the sentinel column -> [B, 1, S, T]
@@ -21,11 +21,11 @@ drop sink) so the comparison is apples-to-apples with the HF eager path
 and MindSpeed-LLM's torch fallback (g2_attention_kernel.sparse_flash_attn).
 
 Usage:
-    python csa_arthur_vs_ours_gpu.py                  # correctness + speed, auto-device
-    python csa_arthur_vs_ours_gpu.py --mode correctness
-    python csa_arthur_vs_ours_gpu.py --mode speed
-    python csa_arthur_vs_ours_gpu.py --device cuda
-    python csa_arthur_vs_ours_gpu.py --iters 50
+    python csa_perf_check_gpu.py                  # correctness + speed, auto-device
+    python csa_perf_check_gpu.py --mode correctness
+    python csa_perf_check_gpu.py --mode speed
+    python csa_perf_check_gpu.py --device cuda
+    python csa_perf_check_gpu.py --iters 50
 """
 
 import argparse
@@ -37,9 +37,9 @@ import torch.nn.functional as F
 
 
 # ---------------------------------------------------------------------------
-# Path A: Arthur #45892 — gather + 5D diagonal mask
+# Path A: #45892 — gather + 5D diagonal mask
 # ---------------------------------------------------------------------------
-def arthur_csa_attention(q, compressed_kv, topk, sinks, scaling):
+def pr_45892_csa_attention(q, compressed_kv, topk, sinks, scaling):
     """
     q:             [B, H, S, D]
     compressed_kv: [B, 1, T, D]
@@ -86,7 +86,7 @@ def arthur_csa_attention(q, compressed_kv, topk, sinks, scaling):
 # ---------------------------------------------------------------------------
 def ours_csa_attention(q, compressed_kv, topk, sinks, scaling):
     """
-    Same signature as arthur_csa_attention. Uses compressed_kv directly,
+    Same signature as pr_45892_csa_attention. Uses compressed_kv directly,
     builds a [B, 1, S, T] mask by scattering 0.0 into a -inf canvas.
     """
     B, H, S, D = q.shape
@@ -169,10 +169,10 @@ def correctness(device):
     for dtype_name, dtype in [("float32", torch.float32),
                               ("bfloat16", torch.bfloat16)]:
         for cfg_name, cfg in CONFIGS.items():
-            # rough OOM guard for Arthur path on small GPUs
-            arthur_attn_bytes = cfg["B"] * cfg["H"] * cfg["S"] * cfg["S"] * cfg["k"] * (2 if dtype != torch.float32 else 4)
-            if device.type == "cuda" and arthur_attn_bytes > 6e9:
-                print(f"  [skip] {cfg_name:>12s} | {dtype_name:<8s}  (arthur attn tensor ~{arthur_attn_bytes/1e9:.1f} GB)")
+            # rough OOM guard for #45892 path on small GPUs
+            pr_45892_attn_bytes = cfg["B"] * cfg["H"] * cfg["S"] * cfg["S"] * cfg["k"] * (2 if dtype != torch.float32 else 4)
+            if device.type == "cuda" and pr_45892_attn_bytes > 6e9:
+                print(f"  [skip] {cfg_name:>12s} | {dtype_name:<8s}  (#45892 attn tensor ~{pr_45892_attn_bytes/1e9:.1f} GB)")
                 continue
             B, S, H, D, m, k = cfg["B"], cfg["S"], cfg["H"], cfg["D"], cfg["m"], cfg["k"]
             T = S // m
@@ -181,7 +181,7 @@ def correctness(device):
             for seed in range(3):
                 q, ckv, topk, sinks, scaling = make_inputs(cfg, dtype, device, seed=seed)
                 with torch.no_grad():
-                    out_a = arthur_csa_attention(q, ckv, topk, sinks, scaling)
+                    out_a = pr_45892_csa_attention(q, ckv, topk, sinks, scaling)
                     out_b = ours_csa_attention(q, ckv, topk, sinks, scaling)
                 diff = (out_a.float() - out_b.float()).abs()
                 ref = out_a.float().abs()
@@ -231,13 +231,13 @@ def benchmark(device, iters, warmup):
 
     for dtype_name, dtype in dtypes:
         print(f"\n== dtype = {dtype_name} ==")
-        header = f"  {'config':<14s} {'B/S/H/D':<16s} {'T/k':<10s} {'ratio':>8s} {'arthur ms':>10s} {'ours ms':>10s} {'speedup':>9s} {'arthur GB':>10s} {'ours GB':>10s}"
+        header = f"  {'config':<14s} {'B/S/H/D':<16s} {'T/k':<10s} {'ratio':>8s} {'#45892 ms':>10s} {'ours ms':>10s} {'speedup':>9s} {'#45892 GB':>10s} {'ours GB':>10s}"
         print(header)
         print("  " + "-" * (len(header) - 2))
         for cfg_name, cfg in CONFIGS.items():
             B, S, H, D, m, k = cfg["B"], cfg["S"], cfg["H"], cfg["D"], cfg["m"], cfg["k"]
             T = S // m
-            ratio = (S * k) / T  # arthur attn cols / ours attn cols
+            ratio = (S * k) / T  # #45892 attn cols / ours attn cols
             shape_s = f"{B}/{S}/{H}/{D}"
             tk_s = f"{T}/{k}"
             try:
@@ -246,9 +246,9 @@ def benchmark(device, iters, warmup):
                 print(f"  {cfg_name:<14s} {shape_s:<16s} {tk_s:<10s}  setup error: {e}")
                 continue
 
-            # Arthur
+            # #45892
             try:
-                a_ms, a_peak = bench_one(arthur_csa_attention, q, ckv, topk, sinks, scaling, device, iters, warmup)
+                a_ms, a_peak = bench_one(pr_45892_csa_attention, q, ckv, topk, sinks, scaling, device, iters, warmup)
                 a_str = f"{a_ms:>10.3f}"
                 a_gb = f"{a_peak/1e9:>10.3f}"
             except torch.cuda.OutOfMemoryError:
