@@ -1,24 +1,22 @@
 """
 Compare two CSA per-query sparse-attention expressions on GPU.
 
-Both are mathematically equivalent to MindSpeed-LLM SparseFlashAttentionTriton's
-per-query sparse attention semantics. This script verifies that equivalence
-in fp32 / bf16, then benchmarks the two on GPU across configs.
+This script verifies that the two expressions are numerically equivalent
+in fp32 / bf16 and benchmarks them on GPU across a range of configs.
 
   Path A — #45892 (HEAD 8bdbfbb):
       * gather compressed_kv into [B, 1, S*k, D] via index_select
       * build 5D diagonal block bias [B, 1, S, S, k], view as [B, 1, S, S*k]
       * eager attention is then [B, H, S, S*k]
 
-  Path B — Ours:
+  Path B — scatter-bias on un-gathered compressed_kv:
       * keep compressed_kv as [B, 1, T, D] (no gather)
       * scatter into a [B, 1, S, T+1] -inf mask (last column is invalid-topk
         sentinel), drop the sentinel column -> [B, 1, S, T]
       * eager attention is then [B, H, S, T]  (T = S/m, typically S*k >> T)
 
 Both paths include the sink-token logic (concat sink column, fp32 softmax,
-drop sink) so the comparison is apples-to-apples with the HF eager path
-and MindSpeed-LLM's torch fallback (g2_attention_kernel.sparse_flash_attn).
+drop sink) so the comparison is apples-to-apples with the HF eager path.
 
 Usage:
     python csa_perf_check_gpu.py                  # correctness + speed, auto-device
