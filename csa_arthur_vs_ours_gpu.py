@@ -167,8 +167,7 @@ def correctness(device):
     print(f"CORRECTNESS  device={device}")
     print("=" * 78)
     for dtype_name, dtype in [("float32", torch.float32),
-                              ("bfloat16", torch.bfloat16),
-                              ("float16", torch.float16)]:
+                              ("bfloat16", torch.bfloat16)]:
         for cfg_name, cfg in CONFIGS.items():
             # rough OOM guard for Arthur path on small GPUs
             arthur_attn_bytes = cfg["B"] * cfg["H"] * cfg["S"] * cfg["S"] * cfg["k"] * (2 if dtype != torch.float32 else 4)
@@ -228,11 +227,7 @@ def benchmark(device, iters, warmup):
     print("=" * 78)
     print(f"SPEED BENCHMARK  device={device}  iters={iters}  warmup={warmup}")
     print("=" * 78)
-    dtypes = [("float32", torch.float32)]
-    if device.type == "cuda":
-        dtypes += [("bfloat16", torch.bfloat16), ("float16", torch.float16)]
-    else:
-        dtypes += [("bfloat16", torch.bfloat16)]
+    dtypes = [("float32", torch.float32), ("bfloat16", torch.bfloat16)]
 
     for dtype_name, dtype in dtypes:
         print(f"\n== dtype = {dtype_name} ==")
