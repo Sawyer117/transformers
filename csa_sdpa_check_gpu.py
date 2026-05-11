@@ -239,7 +239,9 @@ def benchmark(device, iters, warmup, sdpa_ctx_name):
                 sp = f"{a_ms/b_ms:>8.2f}x"
             else:
                 sp = f"{'n/a':>9s}"
-            print(f"  {cfg_name:<14s} {B}/{S}/{H}/{D:<10s} {T}/{k:<8s} {ratio:>7.1f}x {a_str} {b_str} {sp} {a_gb} {b_gb}")
+            shape_s = f"{B}/{S}/{H}/{D}"
+            tk_s = f"{T}/{k}"
+            print(f"  {cfg_name:<14s} {shape_s:<16s} {tk_s:<10s} {ratio:>7.1f}x {a_str} {b_str} {sp} {a_gb} {b_gb}")
 
 
 # ---------------------------------------------------------------------------
